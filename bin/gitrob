@@ -125,22 +125,25 @@ class App
       members = org.members
     end
 
-    progress = Gitrob::ProgressBar.new("Collecting member repositories...",
-      :total => members.count
-    )
-    thread_pool = Thread.pool(options['threads'].to_i)
+    # recursively scan repos of org members if option not diabled
+    if !options.include?('no-recurse')
+      progress = Gitrob::ProgressBar.new("Collecting member repositories...",
+        :total => members.count
+      )
+      thread_pool = Thread.pool(options['threads'].to_i)
 
-    members.each do |member|
-      thread_pool.process do
-        if member.repositories.count > 0
-          repo_count += member.repositories.count
-          progress.log("Collected #{Gitrob::Util::pluralize(member.repositories.count, 'repository', 'repositories')} from #{Paint[member.username, :bright, :white]}")
+      members.each do |member|
+        thread_pool.process do
+          if member.repositories.count > 0
+            repo_count += member.repositories.count
+            progress.log("Collected #{Gitrob::Util::pluralize(member.repositories.count, 'repository', 'repositories')} from #{Paint[member.username, :bright, :white]}")
+          end
+          progress.increment
         end
-        progress.increment
       end
-    end
 
-    thread_pool.shutdown
+      thread_pool.shutdown
+    end
 
     if repo_count.zero?
       Gitrob::fatal("Organization has no repositories to check; exiting.")
@@ -186,42 +189,47 @@ class App
       end
     end
 
-    org.members.each do |member|
-      thread_pool.process do
-        begin
-          db_user = member.save_to_database!(db_org)
+    # recursively scan repos of org members if option not diabled
+    if !options.include?('no-recurse')
+    
+      org.members.each do |member|
+        thread_pool.process do
+          begin
+            db_user = member.save_to_database!(db_org)
 
-          member.repositories.each do |repo|
-            if repo.contents.count > 0
-              db_repo  = repo.save_to_database!(db_org, db_user)
-              findings = 0
+            member.repositories.each do |repo|
+              if repo.contents.count > 0
+                db_repo  = repo.save_to_database!(db_org, db_user)
+                findings = 0
 
-              repo.contents.each do |blob|
-                db_blob = blob.to_model(db_org, db_repo)
+                repo.contents.each do |blob|
+                  db_blob = blob.to_model(db_org, db_repo)
 
-                observers.each do |observer|
-                  observer.observe(db_blob)
+                  observers.each do |observer|
+                    observer.observe(db_blob)
+                  end
+
+                  db_blob.findings.each do |f|
+                    db_blob.findings_count += 1
+                    findings += 1
+                    f.organization = db_org
+                    f.repo         = db_repo
+                    f.user         = db_user
+                  end
+
+                  db_blob.save
                 end
-
-                db_blob.findings.each do |f|
-                  db_blob.findings_count += 1
-                  findings += 1
-                  f.organization = db_org
-                  f.repo         = db_repo
-                  f.user         = db_user
-                end
-
-                db_blob.save
+                progress.log("Processed #{Gitrob::Util::pluralize(repo.contents.count, 'file', 'files')} from #{Paint[repo.full_name, :bright, :white]} with #{findings.zero? ? 'no findings' : Paint[Gitrob::Util.pluralize(findings, 'finding', 'findings'), :yellow]}")
               end
-              progress.log("Processed #{Gitrob::Util::pluralize(repo.contents.count, 'file', 'files')} from #{Paint[repo.full_name, :bright, :white]} with #{findings.zero? ? 'no findings' : Paint[Gitrob::Util.pluralize(findings, 'finding', 'findings'), :yellow]}")
+              progress.increment
             end
+          rescue Exception => e
+            progress.log_error("Encountered error when processing #{Paint[repo.full_name, :bright, :white]} (#{e.class.name})")
             progress.increment
           end
-        rescue Exception => e
-          progress.log_error("Encountered error when processing #{Paint[repo.full_name, :bright, :white]} (#{e.class.name})")
-          progress.increment
         end
       end
+    
     end
 
     thread_pool.shutdown
@@ -253,6 +261,7 @@ class App
   on('--no-server', "Don't start the server when finished")
   on('--no-color', "Don't colorize output")
   on('--no-banner', "Don't print Gitrob banner")
+  on('--no-recurse', "Don't scan repos owned by org contributors")
 
   begin
     if ARGV.empty?
